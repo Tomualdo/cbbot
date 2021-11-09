@@ -6,6 +6,10 @@ from dateutil import tz
 from dateutil.relativedelta import relativedelta
 from pprint import pprint as pp
 import sys
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import pandas as pd
+import matplotlib.dates as mpl_dates
 
 MAX_DATA = 300
 
@@ -57,8 +61,21 @@ def get_candles(gran: str, start, end):
     ll = [_x for _y in ll for _x in _y]
     print(len(ll))
     # print(ll)
+    return ll
+    # [ time, low, high, open, close, volume ]
+    # [1636416000, 57906.6, 59114, 58278.1, 58800.83, 403.6970887]
 
 end = datetime.datetime.now(tz = tz.tzlocal())
-start = datetime.datetime.fromisoformat('2018-06-01 00:45:00')
+start = datetime.datetime.fromisoformat('2021-09-25 00:45:00')
 start = start.replace(tzinfo=tz.tzlocal())
-get_candles('day',start,end)
+data = get_candles('6hour',start,end)
+print(data[0])
+
+plt.style.use('ggplot')
+
+data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
+data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix')
+data_frame.index = pd.DatetimeIndex(data_frame['time'])
+data_frame = data_frame[::-1]
+print(data_frame)
+mpf.plot(data_frame,type='candle',mav=(3,15,64))
