@@ -18,8 +18,6 @@ from enum import IntEnum
 
 MAX_CANDLES = 300
 
-a = cbpro.PublicClient()
-
 class Granularity(IntEnum):
     MINUTE = 60
     MINUTE5 = 300
@@ -28,38 +26,39 @@ class Granularity(IntEnum):
     HOUR6 = 21600
     DAY = 86400
 
+class CandleTime:
+    """Datetime object parser"""
+    def __init__(self, start:str=None, end:str=None):
+        if end is not None:
+            self.end = datetime.datetime.fromisoformat(end).replace(tzinfo=tz.tzlocal())
+        else:
+            self.end = datetime.datetime.now(tz = tz.tzlocal())
+        self.start = datetime.datetime.fromisoformat(start).replace(tzinfo=tz.tzlocal())
 
-def get_candles(granularity: Granularity, start, end, debug=False):
+def get_candles(granularity: Granularity, candle_time:CandleTime, client:cbpro.PublicClient=cbpro.PublicClient(), debug=False):
     grans = granularity.value
     delta_time_candles = grans // 60 * MAX_CANDLES
-    from_time = start
-    until_time = end
-    requested_candles = (end - start).total_seconds() // grans
-    last_stamp = end
+    from_time = candle_time.start
+    until_time = candle_time.end
+    requested_candles = (candle_time.end - candle_time.start).total_seconds() // grans
+    last_stamp = candle_time.end
     if requested_candles > MAX_CANDLES:
         print(f'size is too big... adjusting from time...')
-        from_time = end - relativedelta(minutes=delta_time_candles)
+        from_time = candle_time.end - relativedelta(minutes=delta_time_candles)
         last_stamp = from_time
 
     candle_list = []
-    while last_stamp > start:
-        prices = a.get_product_historic_rates('BTC-EUR',from_time,until_time,grans)
-        # print(prices)
+    while last_stamp > candle_time.start:
+        prices = client.get_product_historic_rates('BTC-EUR',from_time,until_time,grans)
         if prices == []:
             break
         candle_list.append(prices)
-        # print(prices[1:3])
-        # print(len(prices))
-        # print(f'{prices[0]=}\t\t{datetime.datetime.fromtimestamp(prices[0][0])}\
-            # \n{prices[-1]=}\t\t{datetime.datetime.fromtimestamp(prices[-1][0])}')
+
         last_stamp = datetime.datetime.fromtimestamp(prices[-1][0])
         last_stamp = from_time.replace(tzinfo=tz.tzlocal())
-        # print(f'{last_stamp=}')
         # update times
         until_time = last_stamp
-        remain_diff = (until_time - start).total_seconds()
-        # print(f'Remaining time is {remain_diff}')
-        # recalculate delta time candle
+        remain_diff = (until_time - candle_time.start).total_seconds()
         if remain_diff < delta_time_candles*60:
             delta_time_candles = remain_diff // 60
         if remain_diff > grans:
@@ -68,12 +67,77 @@ def get_candles(granularity: Granularity, start, end, debug=False):
     # [ time, low, high, open, close, volume ]
     # [1636416000, 57906.6, 59114, 58278.1, 58800.83, 403.6970887]
 
-end = datetime.datetime.now(tz = tz.tzlocal())
-start = datetime.datetime.fromisoformat('2021-11-10 22:45:00')
-start = start.replace(tzinfo=tz.tzlocal())
-data = get_candles(Granularity.MINUTE,start,end)
+
+time_object = CandleTime(start='2021-11-12 13:00:00', )
+data = get_candles(Granularity.MINUTE,time_object)
+
 print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
-    \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}')
+    \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
+    \n{len(data)=}')
+
+data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
+data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
+# data_frame.time = data_frame.timestamp.data_frame.tz_localize     tz.tzlocal()
+data_frame.index = pd.DatetimeIndex(data_frame['time'])
+data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+
+# data_frame['time'] = pd.DatetimeTZDtype(tz='Europe/Warsaw')
+data_frame = data_frame[::-1]
+print(data_frame)
+
+with open('data.json','w') as file:
+    data_frame.to_json(file,indent=4,orient='records')
+
+strategy_SMA = 41
+strategy_STD = 23
+strategy_upper_bolling_lvl = 2.5
+strategy_lower_bolling_lvl = 2.5
+
+f = data_frame
+f['SMA'] = f['close'].rolling(window=strategy_SMA).mean()
+f['STD'] = f['close'].rolling(window=strategy_STD).std()
+f['AVG'] = f['close'].expanding(min_periods=4).mean() # cumulative AVERAGE
+f['upper'] = f['SMA'] + (f['STD'] *strategy_upper_bolling_lvl)
+f['lower'] = f['SMA'] - (f['STD'] *strategy_lower_bolling_lvl)
+new_df = f
+
+#adding shade to gpraph
+fig = plt.figure(figsize=(18//2,9//2))
+#add the sub plot
+ax = fig.add_subplot(111)
+plt.subplots_adjust(left=0.07, bottom=0.4, top=0.96)
+#get values from data frame
+x_axis = new_df.index
+#plot shade area between low and up
+l = ax.fill_between(x_axis,new_df['upper'],new_df['lower'],color='silver')
+ax.plot(x_axis,new_df['close'],color='magenta',lw=2.5,label='close value')
+ax.plot(x_axis,new_df['SMA'],color='blue',lw=1.5,label='SMA')
+# Calculate the simple average of the data
+y_mean = [np.mean(new_df['close'])]*len(new_df['close'])
+# ax.plot(x_axis,y_mean,color='red',lw=1.5,label='AVG',linestyle='--')
+ax.plot(x_axis,new_df['AVG'],color='red',lw=1.5,label='CUM-AVG')
+
+# if len(new_df[new_df['buy'].notnull()])>0: #dont draw if there is no buy values - also rises error
+#     ax.scatter(x_axis,new_df['buy'],color='green',lw=3,label='buy',marker='^',zorder=5)
+#     # marker label at data point
+#     for i, txt in enumerate(new_df['buy']):
+#         ax.annotate(txt, (x_axis[i], new_df['buy'][i]),textcoords="offset points",xytext=(0,10),ha='left',alpha=0.75)
+#         ax.annotate(str(new_df.index[i]), (x_axis[i], new_df['buy'][i]),alpha=0.75) #time annotate
+# if len(new_df[new_df['sell'].notnull()])>0:#dont draw if there is no sell values - also rises error
+#     ax.scatter(x_axis,new_df['sell'],color='red',lw=3,label='sell',marker='v',zorder=5)
+#     # marker label at data point
+#     for i, txt in enumerate(new_df['sell']):
+#         ax.annotate(txt, (x_axis[i], new_df['sell'][i]),textcoords="offset points",xytext=(0,10),ha='left',alpha=0.75)
+#         ax.annotate(str(new_df.index[i]), (x_axis[i], new_df['sell'][i]),alpha=0.75) #time annotate
+# # plt.xticks(rotation = 45)
+# ax.set_title(current_product+" "+str(earn)+" "+str(remain_spend_EUR))
+# # ax.set_xlabel('time')
+# ax.set_ylabel('value')
+# ax.legend()
+# anim = animation.FuncAnimation(fig, update, interval=10)
+plt.show()
+
+
 
 # def buy_procedure(i,data,buys,buy_signal,sell_signal,money,value):
 #     buy_signal.append(data['close'][i])
@@ -259,14 +323,7 @@ print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
 
 # plt.style.use('ggplot')
 
-# data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
-# data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix')
-# data_frame.index = pd.DatetimeIndex(data_frame['time'])
-# data_frame = data_frame[::-1]
-# print(data_frame)
 
-# with open('data.json','w') as file:
-#     data_frame.to_json(file,indent=4,orient='records')
 
 # strategy_data = {
 #     "strategy_lower_bolling_lvl": 2.5,
