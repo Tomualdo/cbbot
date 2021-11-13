@@ -1,9 +1,9 @@
-import json
+import json, time
 import numpy as np
 import cbpro
 import datetime
 from datetime import timezone
-from dateutil import tz
+from dateutil import tz, parser
 from dateutil.relativedelta import relativedelta
 from pprint import pprint as pp
 import sys
@@ -46,14 +46,22 @@ def get_candles(granularity: Granularity, candle_time:CandleTime, client:cbpro.P
         print(f'size is too big... adjusting from time...')
         from_time = candle_time.end - relativedelta(minutes=delta_time_candles)
         last_stamp = from_time
-
     candle_list = []
     while last_stamp > candle_time.start:
+        print(f'Requesting {from_time=} {until_time=} {grans=}')
         prices = client.get_product_historic_rates('BTC-EUR',from_time,until_time,grans)
         if prices == []:
             break
+        if 'message' in prices:
+            print(prices)
+            if 'requested exceeds 300' in prices['message']:
+                # fix for time shift seasons
+                from_time = from_time + relativedelta(minutes=delta_time_candles*0.2)
+                continue
         candle_list.append(prices)
-
+        print(f'{prices[0]=}\t\t{datetime.datetime.fromtimestamp(prices[0][0])}\
+        \n{prices[-1]=}\t\t{datetime.datetime.fromtimestamp(prices[-1][0])}\
+        \n{len(prices)=}')
         last_stamp = datetime.datetime.fromtimestamp(prices[-1][0])
         last_stamp = from_time.replace(tzinfo=tz.tzlocal())
         # update times
@@ -68,54 +76,190 @@ def get_candles(granularity: Granularity, candle_time:CandleTime, client:cbpro.P
     # [1636416000, 57906.6, 59114, 58278.1, 58800.83, 403.6970887]
 
 
-time_object = CandleTime(start='2021-11-12 13:00:00', )
+time_object = CandleTime(start='2021-11-13 15:00:00',)
 data = get_candles(Granularity.MINUTE,time_object)
+data = data[::-1]
 
-print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
-    \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
-    \n{len(data)=}')
+# print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
+#     \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
+#     \n{len(data)=}')
 
-data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
-data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
-# data_frame.time = data_frame.timestamp.data_frame.tz_localize     tz.tzlocal()
-data_frame.index = pd.DatetimeIndex(data_frame['time'])
-data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+# data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
+# data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
+# # data_frame.time = data_frame.timestamp.data_frame.tz_localize     tz.tzlocal()
+# data_frame.index = pd.DatetimeIndex(data_frame['time'])
+# data_frame['time'] = data_frame['time'].dt.tz_localize(None)
 
-# data_frame['time'] = pd.DatetimeTZDtype(tz='Europe/Warsaw')
-data_frame = data_frame[::-1]
-print(data_frame)
+# # data_frame['time'] = pd.DatetimeTZDtype(tz='Europe/Warsaw')
+# data_frame = data_frame[::-1]
+# print(data_frame)
 
-with open('data.json','w') as file:
-    data_frame.to_json(file,indent=4,orient='records')
+# with open('data.json','w') as file:
+#     data_frame.to_json(file,indent=4,orient='records')
 
-strategy_SMA = 41
-strategy_STD = 23
-strategy_upper_bolling_lvl = 2.5
-strategy_lower_bolling_lvl = 2.5
+from collections import deque
+deq = deque(maxlen=5)
+product_minutes_processed = {}
+product_minute_candlestick = {}
+    
+class MyWebsocketAppClient(cbpro.WebsocketClient):
+    def on_open(self):
+        self.url = "wss://ws-feed.pro.coinbase.com/"
+        self.channels = [ { "name": "ticker" } ]
+        self.products = ["BTC-EUR"]
 
-f = data_frame
-f['SMA'] = f['close'].rolling(window=strategy_SMA).mean()
-f['STD'] = f['close'].rolling(window=strategy_STD).std()
-f['AVG'] = f['close'].expanding(min_periods=4).mean() # cumulative AVERAGE
-f['upper'] = f['SMA'] + (f['STD'] *strategy_upper_bolling_lvl)
-f['lower'] = f['SMA'] - (f['STD'] *strategy_lower_bolling_lvl)
-new_df = f
+    def on_message(self, msg):
+        # print(json.dumps(msg, indent=4, sort_keys=True))
+        if 'time' not in msg:
+            return
+        current_tick = msg
+        previous_tick = current_tick
+        current_product = msg['product_id']
+        tick_dt = self.convert_iso8601_to_datetime(msg)
+        if current_product not in product_minutes_processed:
+            product_minutes_processed[current_product] = deque(maxlen=2)
+        if current_product not in product_minute_candlestick:
+            product_minute_candlestick[current_product] = deque(maxlen=2)
+        if tick_dt not in product_minutes_processed[current_product]: #we have new minute
+            print("starting new candlestick for",current_product)
+            product_minutes_processed[current_product].append(tick_dt)
+            if len(product_minute_candlestick[current_product])>0: #close
+                product_minute_candlestick[current_product][-1]["close"] = previous_tick['price']
+                # [ time, low, high, open, close, volume ]
+                data.append([int(parser.parse(product_minute_candlestick[current_product][-1]['time']).timestamp()),
+                             float(product_minute_candlestick[current_product][-1]['low']),
+                             float(product_minute_candlestick[current_product][-1]['high']),
+                             float(product_minute_candlestick[current_product][-1]['open']),
+                             float(product_minute_candlestick[current_product][-1]["close"])])
+            product_minute_candlestick[current_product].append({
+                "time":tick_dt,
+                "open":current_tick['price'],
+                "high":current_tick['price'],
+                "low":current_tick['price']
+            })
+        if len(product_minute_candlestick[current_product][-1])>0:
+            if current_tick['price'] > product_minute_candlestick[current_product][-1]['high']:
+                product_minute_candlestick[current_product][-1]['high'] = current_tick['price']
+            if current_tick['price'] < product_minute_candlestick[current_product][-1]['low']:
+                product_minute_candlestick[current_product][-1]['low'] = current_tick['price']
+        # print("=======candlesticks========")
+        # print(product_minute_candlestick)
+        # print(product_minutes_processed)
+        
+    def on_close(self):
+        print("-- Goodbye! --")
+    
+    @staticmethod
+    def convert_iso8601_to_datetime(msg:dict) -> datetime.datetime:
+        if 'time' not in msg:
+            raise KeyError(f'Key \'time\' NOT found in msg: {msg}')
+        return (parser.parse(msg['time']).astimezone()).strftime("%Y-%m-%d %H:%M")
 
-#adding shade to gpraph
-fig = plt.figure(figsize=(18//2,9//2))
-#add the sub plot
-ax = fig.add_subplot(111)
-plt.subplots_adjust(left=0.07, bottom=0.4, top=0.96)
-#get values from data frame
-x_axis = new_df.index
-#plot shade area between low and up
-l = ax.fill_between(x_axis,new_df['upper'],new_df['lower'],color='silver')
-ax.plot(x_axis,new_df['close'],color='magenta',lw=2.5,label='close value')
-ax.plot(x_axis,new_df['SMA'],color='blue',lw=1.5,label='SMA')
-# Calculate the simple average of the data
-y_mean = [np.mean(new_df['close'])]*len(new_df['close'])
-# ax.plot(x_axis,y_mean,color='red',lw=1.5,label='AVG',linestyle='--')
-ax.plot(x_axis,new_df['AVG'],color='red',lw=1.5,label='CUM-AVG')
+
+# v={
+#     "best_ask": "56791.11",
+#     "best_bid": "56782.60",
+#     "high_24h": "56916.99",
+#     "last_size": "0.00034207",
+#     "low_24h": "55060.94",
+#     "open_24h": "55205.38",
+#     "price": "56791.11",
+#     "product_id": "BTC-EUR",
+#     "sequence": 13431272745,
+#     "side": "buy",
+#     "time": "2021-11-13T16:09:42.289256Z",
+#     "trade_id": 53807590,
+#     "type": "ticker",
+#     "volume_24h": "490.32098660",
+#     "volume_30d": "36628.65421302"
+# }
+# print(MyWebsocketAppClient.convert_iso8601_to_datetime(v))
+
+
+# data[0]=[1636822920, 56629.48, 56644, 56633.33, 56632.54, 0.29552382]           2021-11-13 18:02:00    
+# data[-1]=[1636812000, 55662.12, 55816.43, 55662.12, 55747.95, 0.49709447]               2021-11-13 15:00:00
+# len(data)=183
+#                                          time       low      high      open     close    volume
+# time
+# 2021-11-13 14:00:00+01:00 2021-11-13 14:00:00  55662.12  55816.43  55662.12  55747.95  0.497094
+# 2021-11-13 14:01:00+01:00 2021-11-13 14:01:00  55738.46  55938.16  55738.46  55899.17  2.521677
+# 2021-11-13 14:02:00+01:00 2021-11-13 14:02:00  55846.00  55947.53  55910.12  55887.31  0.216108
+# 2021-11-13 14:03:00+01:00 2021-11-13 14:03:00  55862.96  55987.61  55876.40  55939.60  0.957316
+# 2021-11-13 14:04:00+01:00 2021-11-13 14:04:00  55923.21  56096.16  55927.46  56091.97  1.280225
+# ...                                       ...       ...       ...       ...       ...       ...
+# 2021-11-13 16:58:00+01:00 2021-11-13 16:58:00  56618.55  56658.92  56618.55  56646.72  0.067909
+# 2021-11-13 16:59:00+01:00 2021-11-13 16:59:00  56600.46  56647.29  56647.29  56627.98  0.149313
+# 2021-11-13 17:00:00+01:00 2021-11-13 17:00:00  56600.17  56621.70  56609.51  56602.02  0.503080
+# 2021-11-13 17:01:00+01:00 2021-11-13 17:01:00  56606.14  56660.39  56608.29  56623.20  0.085404
+# 2021-11-13 17:02:00+01:00 2021-11-13 17:02:00  56629.48  56644.00  56633.33  56632.54  0.295524
+
+# [183 rows x 6 columns]
+
+
+wsClient = MyWebsocketAppClient()
+wsClient.start()
+print(wsClient.url, wsClient.products)
+try:
+    while True:
+        time.sleep(10)
+        # print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
+        # \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
+        # \n{len(data)=}')
+        # print(data[-3:])
+        
+        data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
+        data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
+        data_frame.index = pd.DatetimeIndex(data_frame['time'])
+        data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+        print(data_frame)
+
+        
+except KeyboardInterrupt:
+    wsClient.close()
+
+if wsClient.error:
+    sys.exit(1)
+else:
+    sys.exit(0)
+
+
+
+
+
+
+
+
+
+
+
+# strategy_SMA = 41
+# strategy_STD = 23
+# strategy_upper_bolling_lvl = 2.5
+# strategy_lower_bolling_lvl = 2.5
+
+# f = data_frame
+# f['SMA'] = f['close'].rolling(window=strategy_SMA).mean()
+# f['STD'] = f['close'].rolling(window=strategy_STD).std()
+# f['AVG'] = f['close'].expanding(min_periods=4).mean() # cumulative AVERAGE
+# f['upper'] = f['SMA'] + (f['STD'] *strategy_upper_bolling_lvl)
+# f['lower'] = f['SMA'] - (f['STD'] *strategy_lower_bolling_lvl)
+# new_df = f
+
+# #adding shade to gpraph
+# fig = plt.figure(figsize=(18//2,9//2))
+# #add the sub plot
+# ax = fig.add_subplot(111)
+# plt.subplots_adjust(left=0.07, bottom=0.4, top=0.96)
+# #get values from data frame
+# x_axis = new_df.index
+# #plot shade area between low and up
+# l = ax.fill_between(x_axis,new_df['upper'],new_df['lower'],color='silver')
+# ax.plot(x_axis,new_df['close'],color='magenta',lw=2.5,label='close value')
+# ax.plot(x_axis,new_df['SMA'],color='blue',lw=1.5,label='SMA')
+# # Calculate the simple average of the data
+# y_mean = [np.mean(new_df['close'])]*len(new_df['close'])
+# # ax.plot(x_axis,y_mean,color='red',lw=1.5,label='AVG',linestyle='--')
+# ax.plot(x_axis,new_df['AVG'],color='red',lw=1.5,label='CUM-AVG')
 
 # if len(new_df[new_df['buy'].notnull()])>0: #dont draw if there is no buy values - also rises error
 #     ax.scatter(x_axis,new_df['buy'],color='green',lw=3,label='buy',marker='^',zorder=5)
