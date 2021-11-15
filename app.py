@@ -14,7 +14,7 @@ import matplotlib.dates as mpl_dates
 import dateutil.parser
 from matplotlib.widgets import Slider, Button, RadioButtons
 from enum import IntEnum
-
+from collections import deque
 
 MAX_CANDLES = 300
 
@@ -76,9 +76,10 @@ def get_candles(granularity: Granularity, candle_time:CandleTime, client:cbpro.P
     # [1636416000, 57906.6, 59114, 58278.1, 58800.83, 403.6970887]
 
 
-time_object = CandleTime(start='2021-11-13 15:00:00',)
+time_object = CandleTime(start='2021-11-15 07:00:00',)
 data = get_candles(Granularity.MINUTE,time_object)
 data = data[::-1]
+data = deque(data,maxlen=5)
 
 # print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
 #     \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
@@ -97,8 +98,7 @@ data = data[::-1]
 # with open('data.json','w') as file:
 #     data_frame.to_json(file,indent=4,orient='records')
 
-from collections import deque
-deq = deque(maxlen=5)
+# deq = deque(maxlen=5)
 product_minutes_processed = {}
 product_minute_candlestick = {}
     
@@ -112,6 +112,7 @@ class MyWebsocketAppClient(cbpro.WebsocketClient):
         # print(json.dumps(msg, indent=4, sort_keys=True))
         if 'time' not in msg:
             return
+        global close_update
         current_tick = msg
         previous_tick = current_tick
         current_product = msg['product_id']
@@ -130,18 +131,23 @@ class MyWebsocketAppClient(cbpro.WebsocketClient):
                              float(product_minute_candlestick[current_product][-1]['low']),
                              float(product_minute_candlestick[current_product][-1]['high']),
                              float(product_minute_candlestick[current_product][-1]['open']),
-                             float(product_minute_candlestick[current_product][-1]["close"])])
+                             float(product_minute_candlestick[current_product][-1]['close']),
+                             float(product_minute_candlestick[current_product][-1]['volume'])])
+                close_update = True
             product_minute_candlestick[current_product].append({
                 "time":tick_dt,
                 "open":current_tick['price'],
                 "high":current_tick['price'],
-                "low":current_tick['price']
+                "low":current_tick['price'],
+                "volume":float(current_tick['last_size'])
             })
         if len(product_minute_candlestick[current_product][-1])>0:
             if current_tick['price'] > product_minute_candlestick[current_product][-1]['high']:
                 product_minute_candlestick[current_product][-1]['high'] = current_tick['price']
             if current_tick['price'] < product_minute_candlestick[current_product][-1]['low']:
                 product_minute_candlestick[current_product][-1]['low'] = current_tick['price']
+            # if float(current_tick['last_size']) > product_minute_candlestick[current_product][-1]['volume']:
+            product_minute_candlestick[current_product][-1]['volume'] += float(current_tick['last_size'])
         # print("=======candlesticks========")
         # print(product_minute_candlestick)
         # print(product_minutes_processed)
@@ -194,24 +200,31 @@ class MyWebsocketAppClient(cbpro.WebsocketClient):
 # 2021-11-13 17:02:00+01:00 2021-11-13 17:02:00  56629.48  56644.00  56633.33  56632.54  0.295524
 
 # [183 rows x 6 columns]
-
+def create_df():
+    global close_update
+    data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
+    data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
+    data_frame.index = pd.DatetimeIndex(data_frame['time'])
+    data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+    print(data_frame)
+    close_update = False
 
 wsClient = MyWebsocketAppClient()
 wsClient.start()
 print(wsClient.url, wsClient.products)
+# close_update = False
 try:
+    create_df()
     while True:
-        time.sleep(10)
+        if not close_update:
+            continue
+        create_df()
+        
+        # time.sleep(10)
         # print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
         # \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
         # \n{len(data)=}')
-        # print(data[-3:])
-        
-        data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
-        data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
-        data_frame.index = pd.DatetimeIndex(data_frame['time'])
-        data_frame['time'] = data_frame['time'].dt.tz_localize(None)
-        print(data_frame)
+        # print(data[-3:])  
 
         
 except KeyboardInterrupt:
