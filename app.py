@@ -15,8 +15,12 @@ import dateutil.parser
 from matplotlib.widgets import Slider, Button, RadioButtons
 from enum import IntEnum
 from collections import deque
+from threading import Thread
+
 
 MAX_CANDLES = 300
+product_minutes_processed = {}
+product_minute_candlestick = {}
 
 class Granularity(IntEnum):
     MINUTE = 60
@@ -76,11 +80,6 @@ def get_candles(granularity: Granularity, candle_time:CandleTime, client:cbpro.P
     # [1636416000, 57906.6, 59114, 58278.1, 58800.83, 403.6970887]
 
 
-time_object = CandleTime(start='2021-11-15 07:00:00',)
-data = get_candles(Granularity.MINUTE,time_object)
-data = data[::-1]
-data = deque(data,maxlen=5)
-
 # print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
 #     \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
 #     \n{len(data)=}')
@@ -99,8 +98,7 @@ data = deque(data,maxlen=5)
 #     data_frame.to_json(file,indent=4,orient='records')
 
 # deq = deque(maxlen=5)
-product_minutes_processed = {}
-product_minute_candlestick = {}
+
     
 class MyWebsocketAppClient(cbpro.WebsocketClient):
     def on_open(self):
@@ -205,38 +203,133 @@ def create_df():
     data_frame = pd.DataFrame(data,columns=['time','low', 'high', 'open', 'close', 'volume'],)
     data_frame['time'] = pd.to_datetime(data_frame['time'],unit='s', origin='unix').dt.tz_localize(tz=tz.tzlocal())
     data_frame.index = pd.DatetimeIndex(data_frame['time'])
-    data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+    # data_frame['time'] = data_frame['time'].dt.tz_localize(None)
+    # data_frame = data_frame.iloc[:-2 , :]
     print(data_frame)
     close_update = False
+    return data_frame
+
+
+# header = st.beta_container()
+# with header:
+#     st.title('ffstr')
+time_object = CandleTime(start='2021-11-17 18:30:00',)
+data = get_candles(Granularity.MINUTE,time_object)
+data = data[::-1]
+# data = deque(data,maxlen=len(data))
+
 
 wsClient = MyWebsocketAppClient()
 wsClient.start()
 print(wsClient.url, wsClient.products)
-# close_update = False
+close_update = False
+
+df = create_df()
+
+
+import dash
+# import dash_core_components as dcc
+from dash import dcc
+# import dash_html_components as html
+from dash import html
+import plotly.express as px
+# app = dash.Dash(__name__)
+
+# fig = px.bar(data_frame, x="time", y="close",  barmode="group")
+# app.layout = html.Div(children=[
+#     html.H1(children='Hello Dash'),
+
+#     html.Div(children='''
+#         Dash: A web application framework for your data.
+#     '''),
+
+#     dcc.Graph(
+#         id='example-graph',
+#         figure=fig
+#     )
+# ])
+# app.run_server(debug=True)
+
+
+
+import plotly.graph_objects as go
+from dash.dependencies import Input, Output
+
+app = dash.Dash()
+
+app.layout = html.Div([
+    
+    dcc.Checklist(
+        id='toggle-rangeslider',
+        options=[{'label': 'Include Rangeslider', 
+                  'value': 'slider'}],
+        value=['slider']
+    ),
+    dcc.Graph(id="graph",),
+    html.Button(id='refresh-button',
+                n_clicks=0, 
+                children='Refresh')],
+    style={'width': '100%', 'height': '80%', 'display': 'inline-block'})
+
+# fig = go.Figure(data=[go.Candlestick(x=df['time'],
+#                     open=df['open'],
+#                     high=df['high'],
+#                     low=df['low'],
+#                     close=df['close'],)])
+@app.callback(
+    Output("graph", "figure"), 
+    Input("toggle-rangeslider", "value"),
+    Input("refresh-button", "n_clicks"))
+def display_candlestick(value,n_clicks):
+    fig = go.Figure(data=[go.Candlestick(x=df['time'],
+                    open=df['open'],
+                    high=df['high'],
+                    low=df['low'],
+                    close=df['close'],)])
+    
+    fig.update_layout(
+        xaxis_rangeslider_visible='slider' in value
+    )
+    return fig
+
+# @app.callback(
+#     Output("graph", "figure"),
+#     Input("refresh-button", "n_clicks"))
+# def refresh_candlestick(value):
+#     fig = go.Figure(data=[go.Candlestick(x=df['time'],
+#                     open=df['open'],
+#                     high=df['high'],
+#                     low=df['low'],
+#                     close=df['close'])])
+
+#     return fig
+def _server_thread():
+    print(20*'*'+"START"+20*'*')
+    app.run_server(debug=True, use_reloader=False)
+    print("END")
+
+server_thread = Thread(target=_server_thread)
+server_thread.start()
+
+
 try:
-    create_df()
     while True:
         if not close_update:
             continue
-        create_df()
+        df = create_df()
         
         # time.sleep(10)
         # print(f'{data[0]=}\t\t{datetime.datetime.fromtimestamp(data[0][0])}\
         # \n{data[-1]=}\t\t{datetime.datetime.fromtimestamp(data[-1][0])}\
         # \n{len(data)=}')
-        # print(data[-3:])  
-
-        
+        # print(data[-3:])         
 except KeyboardInterrupt:
     wsClient.close()
-
+    server_thread.join()
 if wsClient.error:
     sys.exit(1)
 else:
     sys.exit(0)
-
-
-
 
 
 
